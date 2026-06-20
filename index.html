@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Serverless Walkie-Talkie</title>
-    <script src="https://unpkg.com/@apinator/client"></script>
+    <script src="https://js.pusher.com/8.3.0/pusher.min.js"></script>
     <style>
         body {
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
@@ -74,84 +74,89 @@
 
     <script>
         // --- 1. CONFIGURATION ---
-        const APINATOR_KEY = "app_fabd1c295723b073ba6dc1afc45ab6357caee416"; // Paste your public Key from apinator.io
-        const CLUSTER_ID = "eu"; // Choose "us" or "eu" depending on your dashboard setting
-        const CHANNEL_NAME = "walkie-talkie-channel"; // Keep this identical on both devices
+        const APINATOR_KEY = "app_fabd1c295723b073ba6dc1afc45ab6357caee416"; 
+        const CLUSTER_ID = "eu"; 
+        const CHANNEL_NAME = "client-walkie-talkie"; // Requires 'client-' prefix for client-to-client triggers
 
-        // Generate a random ID for this specific device tab
+        // Generate a unique ID for this specific device tab
         const myDeviceId = "device_" + Math.random().toString(36).substr(2, 9);
 
         const statusDot = document.getElementById('status-dot');
         const statusText = document.getElementById('status-text');
         const talkBtn = document.getElementById('talk-btn');
 
-        let client;
+        let pusher;
         let channel;
         let mediaRecorder;
         let audioChunks = [];
         let partnerTimeout;
 
-        // --- 2. INITIALIZE APINATOR CONNECTION ---
+        // --- 2. INITIALIZE CONNECTION ---
         function initRealtime() {
-            // Instantiate the client connection
-            client = new Apinator({
-                key: APINATOR_KEY,
-                cluster: CLUSTER_ID
+            // Logs WebSocket status events directly to your browser inspector console
+            Pusher.logToConsole = true;
+
+            // Connect using the Pusher client routing to your designated EU node
+            pusher = new Pusher(APINATOR_KEY, {
+                wsHost: `ws-${CLUSTER_ID}.apinator.io`,
+                wsPort: 80,
+                wssPort: 443,
+                forceTLS: true,
+                disableStats: true,
+                enabledTransports: ['ws', 'wss']
             });
 
-            // Subscribe to your shared public communication room
-            channel = client.subscribe(CHANNEL_NAME);
+            // Subscribe to your shared communication room
+            channel = pusher.subscribe(CHANNEL_NAME);
             
             statusText.innerText = "Searching for partner...";
 
-            // Listen for voice recordings sent by the other device
-            channel.bind('voice_message', (data) => {
+            // Triggered automatically when a handshake establishes successfully
+            pusher.connection.bind('connected', () => {
+                console.log("Successfully connected to Apinator network!");
+                initMicrophone();
+                startHeartbeat();
+            });
+
+            // Listen for incoming voice messages from the other device
+            channel.bind('client-voice_message', (data) => {
                 if (data.senderId !== myDeviceId) {
                     playAudio(data.audioBase64);
                 }
             });
 
-            // Heartbeat Logic: Listen for incoming presence check pings
-            channel.bind('presence_ping', (data) => {
+            // Sync Heartbeat: Handles incoming active connection alerts
+            channel.bind('client-presence_ping', (data) => {
                 if (data.senderId !== myDeviceId) {
                     handlePartnerOnline();
                     
-                    // If they explicitly asked for a discovery response, answer them back immediately
                     if (data.isDiscovery) {
-                        channel.trigger('presence_ping', { senderId: myDeviceId, isDiscovery: false });
+                        channel.trigger('client-presence_ping', { senderId: myDeviceId, isDiscovery: false });
                     }
                 }
             });
-
-            // Start checking for micro permissions as soon as the socket pipeline is ready
-            initMicrophone();
-
-            // Start broadcasting our presence to find the other device
-            startHeartbeat();
         }
 
         // --- 3. ONLINE/OFFLINE STATE MANAGEMENT ---
         function startHeartbeat() {
-            // Announce ourselves immediately on startup
+            // Signal existence immediately upon loading up
             setTimeout(() => {
-                channel.trigger('presence_ping', { senderId: myDeviceId, isDiscovery: true });
-            }, 1000);
+                channel.trigger('client-presence_ping', { senderId: myDeviceId, isDiscovery: true });
+            }, 1500);
 
-            // Keep pinging every 4 seconds so the other device knows we are still active
+            // Repeat presence pings at a 4-second cadence to sustain visibility
             setInterval(() => {
-                channel.trigger('presence_ping', { senderId: myDeviceId, isDiscovery: false });
+                channel.trigger('client-presence_ping', { senderId: myDeviceId, isDiscovery: false });
             }, 4000);
         }
 
         function handlePartnerOnline() {
-            // Change UI states to reflect connection
             statusDot.classList.add('online');
             statusText.innerText = "Partner Connected";
             talkBtn.disabled = false;
             talkBtn.style.color = "#2ecc71";
 
-            // Reset the offline countdown clock. 
-            // If we don't hear a ping for 6 seconds, we assume they closed the app.
+            // If a partner ping isn't detected within 7 seconds, conclude connection drop
             clearTimeout(partnerTimeout);
             partnerTimeout = setTimeout(() => {
                 statusDot.classList.remove('online');
@@ -159,7 +164,7 @@
                 talkBtn.disabled = true;
                 talkBtn.classList.remove('recording');
                 talkBtn.style.color = "#888";
-            }, 6000);
+            }, 7000);
         }
 
         // --- 4. MICROPHONE RECORDING LOGIC ---
@@ -174,16 +179,15 @@
 
                 mediaRecorder.onstop = () => {
                     const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-                    audioChunks = []; // Clear array cache for subsequent recordings
+                    audioChunks = [];
 
-                    // Convert binary file stream into standard Base64 text string
                     const reader = new FileReader();
                     reader.readAsDataURL(audioBlob);
                     reader.onloadend = () => {
                         const base64Audio = reader.result;
                         
-                        // Push out to the network channel
-                        channel.trigger('voice_message', {
+                        // Push out data payload directly to the network channel
+                        channel.trigger('client-voice_message', {
                             senderId: myDeviceId,
                             audioBase64: base64Audio
                         });
@@ -192,7 +196,7 @@
 
                 setupControlEvents();
             } catch (err) {
-                statusText.innerText = "Microphone access block encountered.";
+                statusText.innerText = "Microphone access blocked.";
                 console.error(err);
             }
         }
@@ -221,6 +225,7 @@
             }
         }
 
+        // Handles click releases and mobile finger lifting
         function stopRecording() {
             if (mediaRecorder && mediaRecorder.state === "recording") {
                 mediaRecorder.stop();
@@ -233,7 +238,7 @@
         function playAudio(base64Data) {
             const audio = new Audio(base64Data);
             audio.play().catch(err => {
-                console.warn("Auto-playback throttled by system audio rules.", err);
+                console.warn("Auto-playback throttled by browser audio rules.", err);
             });
         }
 
