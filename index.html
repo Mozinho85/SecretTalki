@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Serverless Walkie-Talkie</title>
+    <script src="https://unpkg.com/@apinator/client"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            background-color: #121212;
+            color: #ffffff;
+            margin: 0;
+        }
+        #status-container {
+            display: flex;
+            align-items: center;
+            margin-bottom: 40px;
+            font-size: 1.2rem;
+        }
+        .dot {
+            width: 15px;
+            height: 15px;
+            border-radius: 50%;
+            background-color: #ff4d4d;
+            margin-right: 10px;
+            box-shadow: 0 0 10px #ff4d4d;
+            transition: all 0.3s ease;
+        }
+        .dot.online {
+            background-color: #2ecc71;
+            box-shadow: 0 0 10px #2ecc71;
+        }
+        #talk-btn {
+            width: 180px;
+            height: 180px;
+            border-radius: 50%;
+            border: none;
+            background: linear-gradient(145deg, #1e1e1e, #252525);
+            box-shadow: 7px 7px 14px #0b0b0b, -7px -7px 14px #292929;
+            color: #888;
+            font-size: 1.3rem;
+            font-weight: bold;
+            cursor: pointer;
+            outline: none;
+            transition: all 0.2s ease;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+        #talk-btn:disabled {
+            opacity: 0.3;
+            cursor: not-allowed;
+        }
+        #talk-btn.recording {
+            background: #e74c3c;
+            color: white;
+            box-shadow: 0 0 25px #e74c3c;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="status-container">
+        <div id="status-dot" class="dot"></div>
+        <span id="status-text">Connecting to network...</span>
+    </div>
+
+    <button id="talk-btn" disabled>PUSH TO TALK</button>
+
+    <script>
+        // --- 1. CONFIGURATION ---
+        const APINATOR_KEY = "app_fabd1c295723b073ba6dc1afc45ab6357caee416"; // Paste your public Key from apinator.io
+        const CLUSTER_ID = "us"; // Choose "us" or "eu" depending on your dashboard setting
+        const CHANNEL_NAME = "walkie-talkie-channel"; // Keep this identical on both devices
+
+        // Generate a random ID for this specific device tab
+        const myDeviceId = "device_" + Math.random().toString(36).substr(2, 9);
+
+        const statusDot = document.getElementById('status-dot');
+        const statusText = document.getElementById('status-text');
+        const talkBtn = document.getElementById('talk-btn');
+
+        let client;
+        let channel;
+        let mediaRecorder;
+        let audioChunks = [];
+        let partnerTimeout;
+
+        // --- 2. INITIALIZE APINATOR CONNECTION ---
+        function initRealtime() {
+            // Instantiate the client connection
+            client = new Apinator({
+                key: APINATOR_KEY,
+                cluster: CLUSTER_ID
+            });
+
+            // Subscribe to your shared public communication room
+            channel = client.subscribe(CHANNEL_NAME);
+            
+            statusText.innerText = "Searching for partner...";
+
+            // Listen for voice recordings sent by the other device
+            channel.bind('voice_message', (data) => {
+                if (data.senderId !== myDeviceId) {
+                    playAudio(data.audioBase64);
+                }
+            });
+
+            // Heartbeat Logic: Listen for incoming presence check pings
+            channel.bind('presence_ping', (data) => {
+                if (data.senderId !== myDeviceId) {
+                    handlePartnerOnline();
+                    
+                    // If they explicitly asked for a discovery response, answer them back immediately
+                    if (data.isDiscovery) {
+                        channel.trigger('presence_ping', { senderId: myDeviceId, isDiscovery: false });
+                    }
+                }
+            });
+
+            // Start checking for micro permissions as soon as the socket pipeline is ready
+            initMicrophone();
+
+            // Start broadcasting our presence to find the other device
+            startHeartbeat();
+        }
+
+        // --- 3. ONLINE/OFFLINE STATE MANAGEMENT ---
+        function startHeartbeat() {
+            // Announce ourselves immediately on startup
+            setTimeout(() => {
+                channel.trigger('presence_ping', { senderId: myDeviceId, isDiscovery: true });
+            }, 1000);
+
+            // Keep pinging every 4 seconds so the other device knows we are still active
+            setInterval(() => {
+                channel.trigger('presence_ping', { senderId: myDeviceId, isDiscovery: false });
+            }, 4000);
+        }
+
+        function handlePartnerOnline() {
+            // Change UI states to reflect connection
+            statusDot.classList.add('online');
+            statusText.innerText = "Partner Connected";
+            talkBtn.disabled = false;
+            talkBtn.style.color = "#2ecc71";
+
+            // Reset the offline countdown clock. 
+            // If we don't hear a ping for 6 seconds, we assume they closed the app.
+            clearTimeout(partnerTimeout);
+            partnerTimeout = setTimeout(() => {
+                statusDot.classList.remove('online');
+                statusText.innerText = "Partner went offline";
+                talkBtn.disabled = true;
+                talkBtn.classList.remove('recording');
+                talkBtn.style.color = "#888";
+            }, 6000);
+        }
+
+        // --- 4. MICROPHONE RECORDING LOGIC ---
+        async function initMicrophone() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                mediaRecorder = new MediaRecorder(stream);
+
+                mediaRecorder.ondataavailable = (event) => {
+                    audioChunks.push(event.data);
+                };
+
+                mediaRecorder.onstop = () => {
+                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                    audioChunks = []; // Clear array cache for subsequent recordings
+
+                    // Convert binary file stream into standard Base64 text string
+                    const reader = new FileReader();
+                    reader.readAsDataURL(audioBlob);
+                    reader.onloadend = () => {
+                        const base64Audio = reader.result;
+                        
+                        // Push out to the network channel
+                        channel.trigger('voice_message', {
+                            senderId: myDeviceId,
+                            audioBase64: base64Audio
+                        });
+                    };
+                };
+
+                setupControlEvents();
+            } catch (err) {
+                statusText.innerText = "Microphone access block encountered.";
+                console.error(err);
+            }
+        }
+
+        function setupControlEvents() {
+            // PC Mouse Inputs
+            talkBtn.addEventListener('mousedown', startRecording);
+            talkBtn.addEventListener('mouseup', stopRecording);
+
+            // Mobile Device Press Touch Controls
+            talkBtn.addEventListener('touchstart', (e) => {
+                e.preventDefault();
+                startRecording();
+            });
+            talkBtn.addEventListener('touchend', (e) => {
+                e.preventDefault();
+                stopRecording();
+            });
+        }
+
+        function startRecording() {
+            if (mediaRecorder && mediaRecorder.state === "inactive") {
+                mediaRecorder.start();
+                talkBtn.classList.add('recording');
+                talkBtn.innerText = "TALKING...";
+            }
+        }
+
+        function stopRecording() {
+            if (mediaRecorder && mediaRecorder.state === "recording") {
+                mediaRecorder.stop();
+                talkBtn.classList.remove('recording');
+                talkBtn.innerText = "PUSH TO TALK";
+            }
+        }
+
+        // --- 5. AUDIO OUTPUT TARGET ---
+        function playAudio(base64Data) {
+            const audio = new Audio(base64Data);
+            audio.play().catch(err => {
+                console.warn("Auto-playback throttled by system audio rules.", err);
+            });
+        }
+
+        // Kickoff
+        initRealtime();
+    </script>
+</body>
+</html>
