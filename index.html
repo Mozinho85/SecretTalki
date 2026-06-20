@@ -91,13 +91,14 @@
         let audioChunks = [];
         let partnerTimeout;
 
-        // --- 2. INITIALIZE CONNECTION ---
+       // --- 2. INITIALIZE CONNECTION ---
         function initRealtime() {
             // Logs WebSocket status events directly to your browser inspector console
             Pusher.logToConsole = true;
 
             // Connect using the Pusher client routing to your designated EU node
             pusher = new Pusher(APINATOR_KEY, {
+                cluster: CLUSTER_ID, // Added back explicitly for the options validator
                 wsHost: `ws-${CLUSTER_ID}.apinator.io`,
                 wsPort: 80,
                 wssPort: 443,
