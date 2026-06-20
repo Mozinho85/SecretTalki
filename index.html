@@ -96,10 +96,11 @@
             // Logs WebSocket status events directly to your browser inspector console
             Pusher.logToConsole = true;
 
-            // Connect using the Pusher client routing to your designated EU node
+           // Connect using the Pusher client routing to your designated EU node
             pusher = new Pusher(APINATOR_KEY, {
-                cluster: CLUSTER_ID, // Added back explicitly for the options validator
+                cluster: CLUSTER_ID,
                 wsHost: `ws-${CLUSTER_ID}.apinator.io`,
+                wsPath: `/app/${APINATOR_KEY}`, // FORCED PATH: Explicitly defines the Apinator app route
                 wsPort: 80,
                 wssPort: 443,
                 forceTLS: true,
